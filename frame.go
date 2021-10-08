@@ -363,7 +363,6 @@ func (f *Framer) endWrite() error {
 		f.logWrite()
 	}
 	_, err := f.w.Append(f.wbuf) // FIXME(zjb)： netpoll 保证全写，但不一定是一次写完的，大包会异步写
-	_ = f.w.Flush()
 	_ = f.wbuf.Close()
 	return err
 }
