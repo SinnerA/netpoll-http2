@@ -820,13 +820,42 @@ func (sc *serverConn) readPreface() error {
 	errc := make(chan error, 1)
 	go func() {
 		// Read the client preface
-		if buf, err := sc.r.Next(len(clientPreface)); err != nil {
-			errc <- err
-		} else if !bytes.Equal(buf, clientPreface) {
+		var (
+			peekOffset = len(clientPreface)
+			copyOffset = 0
+			buf        = make([]byte, 0, len(clientPreface))
+		)
+		for {
+			peekBuf, err := sc.r.Peek(peekOffset)
+			if err != nil && err != bufio.ErrBufferFull {
+				errc <- err
+				break
+			}
+
+			n := copy(buf[copyOffset:], peekBuf)
+			copyOffset += n
+			_ = sc.r.Skip(n)
+
+			peekOffset -= n
+			if peekOffset <= 0 {
+				break
+			}
+		}
+		if !bytes.Equal(buf, clientPreface) {
 			errc <- fmt.Errorf("bogus greeting %q", buf)
 		} else {
 			errc <- nil
 		}
+
+		// FIXME
+		//buf, err := sc.r.Peek(len(clientPreface))
+		//if err != nil {
+		//	errc <- err
+		//} else if !bytes.Equal(buf, clientPreface) {
+		//	errc <- fmt.Errorf("bogus greeting %q", buf)
+		//} else {
+		//	errc <- nil
+		//}
 	}()
 	timer := time.NewTimer(prefaceTimeout) // TODO: configurable on *Server?
 	defer timer.Stop()

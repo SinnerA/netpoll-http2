@@ -19,6 +19,7 @@
 package http2
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -237,10 +238,32 @@ func ReadFrameHeader(r netpoll.Reader) (FrameHeader, error) {
 }
 
 func readFrameHeader(r netpoll.Reader) (FrameHeader, error) {
-	buf, err := r.Next(frameHeaderLen)
-	if err != nil {
-		return FrameHeader{}, err
+	var (
+		peekOffset = frameHeaderLen
+		copyOffset = 0
+		buf        = make([]byte, frameHeaderLen)
+	)
+	for {
+		peekBuf, err := r.Peek(peekOffset)
+		if err != nil && err != bufio.ErrBufferFull {
+			return FrameHeader{}, err
+		}
+
+		n := copy(buf[copyOffset:], peekBuf)
+		copyOffset += n
+		_ = r.Skip(n)
+
+		peekOffset -= n
+		if peekOffset <= 0 {
+			break
+		}
 	}
+
+	// FIXME
+	//buf, err := r.Next(frameHeaderLen)
+	//if err != nil {
+	//	return FrameHeader{}, err
+	//}
 	_ = buf[frameHeaderLen-1] // check length
 	return FrameHeader{
 		Length:   uint32(buf[0])<<16 | uint32(buf[1])<<8 | uint32(buf[2]),
@@ -279,8 +302,14 @@ type Framer struct {
 
 	maxWriteSize uint32 // zero means unlimited; TODO: implement
 
-	w          netpoll.Writer      // TODO: use netpoll.Writer
-	wbuf       []byte
+	// TODO: let getReadBuf be configurable, and use a less memory-pinning
+	// allocator in server.go to minimize memory pinned for many idle conns.
+	// Will probably also need to make frame invalidation have a hook too.
+	getReadBuf func(size uint32) []byte
+	readBuf    []byte // cache for default getReadBuf
+
+	w    netpoll.Writer // TODO: use netpoll.Writer
+	wbuf []byte
 	//wbuf       *netpoll.LinkBuffer // TODO(zjb): LinkBuffer become nil after WriteV
 	//wHeaderBuf []byte              // reference wbuf TODO(zjb): LinkBuffer can't seek back
 
@@ -318,7 +347,7 @@ type Framer struct {
 
 	logReads, logWrites bool
 
-	debugFramer       *Framer // only use for logging written writes
+	debugFramer *Framer // only use for logging written writes
 	//debugFramerBuf    *bytes.Buffer
 	debugFramerBuf    *netpoll.LinkBuffer
 	debugReadLoggerf  func(string, ...interface{})
@@ -517,6 +546,14 @@ func NewFramer(w netpoll.Writer, r netpoll.Reader) *Framer {
 		debugReadLoggerf:  log.Printf,
 		debugWriteLoggerf: log.Printf,
 	}
+	fr.getReadBuf = func(size uint32) []byte {
+		if cap(fr.readBuf) >= int(size) {
+			return fr.readBuf[:size]
+		}
+		fr.readBuf = make([]byte, size)
+		return fr.readBuf
+	}
+
 	fr.SetMaxReadFrameSize(maxFrameSize)
 	return fr
 }
@@ -572,17 +609,45 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fh.Length > fr.maxReadSize {
+
+	fhLen := fh.Length
+
+	if fhLen > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
-	payload, err := fr.r.ReadBinary(int(fh.Length))
-	if err != nil {
-		return nil, err
+
+	var (
+		peekOffset = int(fhLen)
+		copyOffset = 0
+		readBuf    = fr.getReadBuf(fhLen)
+	)
+	if fhLen > 0 {
+		for {
+			peekBuf, err := fr.r.Peek(peekOffset)
+			if err != nil && err != bufio.ErrBufferFull {
+				return nil, err
+			}
+
+			n := copy(readBuf[copyOffset:], peekBuf)
+			copyOffset += n
+			_ = fr.r.Skip(n)
+
+			peekOffset -= n
+			if peekOffset <= 0 {
+				break
+			}
+		}
 	}
+
+	// FIXME debug
+	//payload, err := fr.r.ReadBinary(int(fh.Length))
+	//if err != nil {
+	//	return nil, err
+	//}
 	if err := fr.r.Release(); err != nil {
 		return nil, err
 	}
-	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, payload)
+	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, readBuf)
 	if err != nil {
 		if ce, ok := err.(connError); ok {
 			return nil, fr.connError(ce.Code, ce.Reason)
