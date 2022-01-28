@@ -280,7 +280,7 @@ type Framer struct {
 
 	maxWriteSize uint32 // zero means unlimited; TODO: implement
 
-	w    netpoll.Writer
+	w    io.Writer
 	wbuf []byte
 
 	// AllowIllegalWrites permits the Framer's Write methods to
@@ -360,7 +360,7 @@ func (f *Framer) endWrite() error {
 	if f.logWrites {
 		f.logWrite()
 	}
-	_, err := f.w.WriteBinary(f.wbuf)
+	_, err := f.w.Write(f.wbuf)
 	return err
 }
 
@@ -425,7 +425,7 @@ func (fc *frameCache) getDataFrame() *DataFrame {
 }
 
 // NewFramer returns a Framer that writes frames to w and reads them from r.
-func NewFramer(w netpoll.Writer, r netpoll.Reader) *Framer {
+func NewFramer(w io.Writer, r netpoll.Reader) *Framer {
 	fr := &Framer{
 		w:                 w,
 		r:                 r,
@@ -846,7 +846,7 @@ func (f *Framer) WriteClientPrefaceAndSettings(settings ...Setting) error {
 		f.logWrite()
 	}
 
-	_, err := f.w.WriteBinary(f.wbuf)
+	_, err := f.w.Write(f.wbuf)
 	return err
 }
 
